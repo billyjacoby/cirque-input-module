@@ -421,10 +421,14 @@ static void pinnacle_report_data_abs_rel(const struct device *dev) {
         int16_t wheel = 0;
         bool is_touching = data->last_z > 0;
         bool was_touching = old_z > 0;
-        bool touch_in_grace = !was_touching && old_num_z_idle > 0 && old_num_z_idle < NUM_ZIDLE;
-        bool touch_was_active = was_touching || old_num_z_idle > 0;
-        bool touch_ended = !is_touching && touch_was_active && ((old_num_z_idle + 1) >= NUM_ZIDLE);
-        bool touch_started = is_touching && !was_touching && !touch_in_grace;
+        bool touch_ended = !is_touching && was_touching;
+        bool touch_started = is_touching && !was_touching;
+
+        if (is_touching) {
+            data->num_z_idle = 0;
+        } else if (old_num_z_idle < NUM_ZIDLE) {
+            data->num_z_idle = old_num_z_idle + 1;
+        }
 
         if (touch_started) {
             int32_t start_x = data->last_x - config->circular_scroll_center_x;
