@@ -411,11 +411,14 @@ static void pinnacle_report_data_abs_rel(const struct device *dev) {
     int16_t old_x = data->last_x;
     int16_t old_y = data->last_y;
     int8_t old_z = data->last_z;
-    int8_t old_num_z_idle = data->num_z_idle;
 
     int ret = pinnacle_read_abs(dev);
+    if (ret != 0) {
+        set_int(dev, true);
+        return;
+    }
 
-    if (ret == 0) {
+    {
         int16_t dx = data->last_x - old_x;
         int16_t dy = data->last_y - old_y;
         int16_t wheel = 0;
@@ -423,12 +426,6 @@ static void pinnacle_report_data_abs_rel(const struct device *dev) {
         bool was_touching = old_z > 0;
         bool touch_ended = !is_touching && was_touching;
         bool touch_started = is_touching && !was_touching;
-
-        if (is_touching) {
-            data->num_z_idle = 0;
-        } else if (old_num_z_idle < NUM_ZIDLE) {
-            data->num_z_idle = old_num_z_idle + 1;
-        }
 
         if (touch_started) {
             int32_t start_x = data->last_x - config->circular_scroll_center_x;
