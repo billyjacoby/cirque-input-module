@@ -34,6 +34,36 @@ properties:
     type: int
     description: If non zero, uses pad in absmode, but sends relative events (and touch press/release)
     default: 0
+  circular-scroll:
+    type: boolean
+    description: Convert circular movement in the outer pad area to vertical scroll events.
+  circular-scroll-invert:
+    type: boolean
+    description: Invert circular scroll direction.
+  circular-scroll-min-radius:
+    type: int
+    default: 550
+    description: Minimum raw distance from pad center required to start a circular scroll touch.
+  circular-scroll-active-min-radius:
+    type: int
+    default: 550
+    description: Minimum raw distance from pad center allowed for scrolling after a touch has started in scroll mode.
+  circular-scroll-max-radius:
+    type: int
+    default: 1200
+    description: Maximum raw distance from pad center allowed for circular scroll.
+  circular-scroll-divisor:
+    type: int
+    default: 32
+    description: Higher values reduce scroll ticks per rotation.
+  circular-scroll-center-x:
+    type: int
+    default: 1024
+    description: Raw absolute X coordinate used as the circular scroll center.
+  circular-scroll-center-y:
+    type: int
+    default: 736
+    description: Raw absolute Y coordinate used as the circular scroll center.
   absolute-mode-scale-to-width:
     type: int
     default: 1024
@@ -66,4 +96,3 @@ properties:
     description: |
       Specification says that active reporting of absolute position
       is: 128 ≤ X ≤1920 and 64 ≤ Y ≤ 1472, but on my touchpad, I need other values.
-

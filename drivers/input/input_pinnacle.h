@@ -79,6 +79,15 @@ struct pinnacle_data {
     int8_t last_z;
     int8_t num_z_idle;
     int16_t last_x, last_y; // last abs reading
+    int32_t pointer_x_accum, pointer_y_accum;
+    int16_t circular_x, circular_y;
+    int32_t circular_scroll_accum;
+    bool circular_scroll_active;
+    bool touch_scroll_mode;
+    bool touch_click_candidate;
+    bool touch_scrolled;
+    int16_t touch_start_x, touch_start_y;
+    int64_t touch_start_ms;
 
     const struct device *dev;
     struct gpio_callback gpio_cb;
@@ -105,11 +114,12 @@ struct pinnacle_config {
     pinnacle_seq_read_t seq_read;
     pinnacle_write_t write;
 
-    bool rotate_90, sleep_en, no_taps, no_secondary_tap, x_invert, y_invert, absolute_mode;
+    bool rotate_90, sleep_en, no_taps, no_secondary_tap, x_invert, y_invert, absolute_mode, circular_scroll, circular_scroll_invert;
     uint8_t abs_rel_divisor;
     enum pinnacle_sensitivity sensitivity;
     uint8_t x_axis_z_min, y_axis_z_min;
     uint16_t absolute_mode_scale_to_width, absolute_mode_scale_to_height, absolute_mode_clamp_min_x, absolute_mode_clamp_max_x, absolute_mode_clamp_min_y, absolute_mode_clamp_max_y;
+    uint16_t circular_scroll_min_radius, circular_scroll_active_min_radius, circular_scroll_max_radius, circular_scroll_divisor, circular_scroll_center_x, circular_scroll_center_y;
     const struct gpio_dt_spec dr;
 };
 

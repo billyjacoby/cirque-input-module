@@ -26,6 +26,25 @@ static int pinnacle_write(const struct device *dev, const uint8_t addr, const ui
 // But for now just have the touch controller emit NUM_ZIDLE_PAD extra idles
 #define NUM_ZIDLE  3
 #define NUM_ZIDLE_PAD 2
+#define PINNACLE_TAP_MAX_MS 300
+#define PINNACLE_TAP_MAX_DISTANCE 90
+#define PINNACLE_POINTER_ACCEL_THRESHOLD 18
+#define PINNACLE_POINTER_ACCEL_NUMERATOR 3
+#define PINNACLE_POINTER_ACCEL_DENOMINATOR 2
+
+static int16_t pinnacle_abs_i16(int16_t value) {
+    return value < 0 ? -value : value;
+}
+
+static int8_t pinnacle_clamp_i8(int32_t value) {
+    if (value > INT8_MAX) {
+        return INT8_MAX;
+    }
+    if (value < INT8_MIN) {
+        return INT8_MIN;
+    }
+    return (int8_t)value;
+}
 
 #if DT_ANY_INST_ON_BUS_STATUS_OKAY(i2c)
 
@@ -235,7 +254,8 @@ static int pinnacle_era_write(const struct device *dev, const uint16_t addr, uin
     return ret;
 }
 
-static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
+static void pinnacle_send_rel_scroll(const struct device *dev, int8_t dx, int8_t dy,
+                                     int16_t wheel) {
     const struct pinnacle_config *config = dev->config;
     struct pinnacle_data *data = dev->data;
 
@@ -266,6 +286,7 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
             data->num_z_idle = 0;
             dx = 0;
             dy = 0; // starting a new press, must reset deltas
+            wheel = 0;
         }
     } else {
         data->num_z_idle++;
@@ -274,9 +295,13 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
         }
         dx = 0;
         dy = 0;
+        wheel = 0;
+        data->circular_scroll_active = false;
+        data->circular_scroll_accum = 0;
     }
 
-    LOG_DBG("Rel move: touch_changed=%d z=%d dx=%d dy=%d", touch_changed, data->last_z, dx, dy);
+    LOG_DBG("Rel move: touch_changed=%d z=%d dx=%d dy=%d wheel=%d", touch_changed, data->last_z,
+            dx, dy, wheel);
 
     if(touch_changed)
     {
@@ -287,8 +312,13 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
 
     if(must_send) {
         input_report_rel(dev, INPUT_REL_X, dx, false, K_FOREVER);
-        input_report_rel(dev, INPUT_REL_Y, dy, true, K_FOREVER); 
+        input_report_rel(dev, INPUT_REL_Y, dy, false, K_FOREVER);
+        input_report_rel(dev, INPUT_REL_WHEEL, wheel, true, K_FOREVER);
     }
+}
+
+static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
+    pinnacle_send_rel_scroll(dev, dx, dy, 0);
 }
 
 static void pinnacle_send_abs(const struct device *dev) {
@@ -377,20 +407,145 @@ static void pinnacle_report_data_abs(const struct device *dev) {
 
 static void pinnacle_report_data_abs_rel(const struct device *dev) {
     struct pinnacle_data *data = dev->data;
+    const struct pinnacle_config *config = dev->config;
     int16_t old_x = data->last_x;
     int16_t old_y = data->last_y;
+    int8_t old_z = data->last_z;
+    int8_t old_num_z_idle = data->num_z_idle;
 
     int ret = pinnacle_read_abs(dev);
 
     if (ret == 0) {
         int16_t dx = data->last_x - old_x;
         int16_t dy = data->last_y - old_y;
-        const struct pinnacle_config *config = dev->config;
+        int16_t wheel = 0;
+        bool is_touching = data->last_z > 0;
+        bool was_touching = old_z > 0;
+        bool touch_in_grace = !was_touching && old_num_z_idle > 0 && old_num_z_idle < NUM_ZIDLE;
+        bool touch_was_active = was_touching || old_num_z_idle > 0;
+        bool touch_ended = !is_touching && touch_was_active && ((old_num_z_idle + 1) >= NUM_ZIDLE);
+        bool touch_started = is_touching && !was_touching && !touch_in_grace;
 
-        dx /= config->abs_rel_divisor;
-        dy /= config->abs_rel_divisor;
+        if (touch_started) {
+            int32_t start_x = data->last_x - config->circular_scroll_center_x;
+            int32_t start_y = data->last_y - config->circular_scroll_center_y;
+            int32_t start_radius_sq = (start_x * start_x) + (start_y * start_y);
+            int32_t min_radius_sq =
+                config->circular_scroll_min_radius * config->circular_scroll_min_radius;
+            int32_t max_radius_sq =
+                config->circular_scroll_max_radius * config->circular_scroll_max_radius;
 
-        pinnacle_send_rel(dev, (int8_t) dx, (int8_t) dy);
+            data->touch_start_x = data->last_x;
+            data->touch_start_y = data->last_y;
+            data->touch_start_ms = k_uptime_get();
+            data->touch_scroll_mode = config->circular_scroll &&
+                                      start_radius_sq >= min_radius_sq &&
+                                      start_radius_sq <= max_radius_sq;
+            data->touch_click_candidate = true;
+            data->touch_scrolled = false;
+            data->circular_scroll_active = data->touch_scroll_mode;
+            data->circular_x = data->last_x;
+            data->circular_y = data->last_y;
+            data->circular_scroll_accum = 0;
+            data->pointer_x_accum = 0;
+            data->pointer_y_accum = 0;
+            dx = 0;
+            dy = 0;
+        }
+
+        if (is_touching && data->touch_click_candidate) {
+            int32_t tap_dx = data->last_x - data->touch_start_x;
+            int32_t tap_dy = data->last_y - data->touch_start_y;
+            int32_t tap_distance_sq = (tap_dx * tap_dx) + (tap_dy * tap_dy);
+
+            if (tap_distance_sq > (PINNACLE_TAP_MAX_DISTANCE * PINNACLE_TAP_MAX_DISTANCE)) {
+                data->touch_click_candidate = false;
+            }
+        }
+
+        if (data->touch_scroll_mode && data->last_z > 0) {
+            int32_t x = data->last_x - config->circular_scroll_center_x;
+            int32_t y = data->last_y - config->circular_scroll_center_y;
+            int32_t radius_sq = (x * x) + (y * y);
+            int32_t min_radius_sq =
+                config->circular_scroll_active_min_radius * config->circular_scroll_active_min_radius;
+            int32_t max_radius_sq = config->circular_scroll_max_radius * config->circular_scroll_max_radius;
+
+            dx = 0;
+            dy = 0;
+
+            if (radius_sq >= min_radius_sq && radius_sq <= max_radius_sq) {
+                if (data->circular_scroll_active) {
+                    int32_t prev_x = data->circular_x - config->circular_scroll_center_x;
+                    int32_t prev_y = data->circular_y - config->circular_scroll_center_y;
+                    int32_t cross = (prev_x * y) - (prev_y * x);
+                    int32_t delta = (cross * 128) / MAX(radius_sq, 1);
+
+                    if (config->circular_scroll_invert) {
+                        delta = -delta;
+                    }
+
+                    data->circular_scroll_accum += delta;
+                    wheel = data->circular_scroll_accum / config->circular_scroll_divisor;
+                    data->circular_scroll_accum -= wheel * config->circular_scroll_divisor;
+                } else {
+                    data->circular_scroll_accum = 0;
+                    data->circular_scroll_active = true;
+                }
+
+                data->touch_scrolled = true;
+                data->touch_click_candidate = false;
+                data->circular_x = data->last_x;
+                data->circular_y = data->last_y;
+                dx = 0;
+                dy = 0;
+            } else {
+                data->circular_scroll_active = false;
+                data->circular_scroll_accum = 0;
+            }
+        } else if (touch_ended) {
+            data->circular_scroll_active = false;
+            data->circular_scroll_accum = 0;
+            data->touch_scroll_mode = false;
+            data->pointer_x_accum = 0;
+            data->pointer_y_accum = 0;
+        }
+
+        if (is_touching && !data->touch_scroll_mode) {
+            int16_t raw_dx = dx;
+            int16_t raw_dy = dy;
+            int16_t speed = pinnacle_abs_i16(raw_dx) + pinnacle_abs_i16(raw_dy);
+
+            if (speed > PINNACLE_POINTER_ACCEL_THRESHOLD) {
+                raw_dx = (raw_dx * PINNACLE_POINTER_ACCEL_NUMERATOR) /
+                         PINNACLE_POINTER_ACCEL_DENOMINATOR;
+                raw_dy = (raw_dy * PINNACLE_POINTER_ACCEL_NUMERATOR) /
+                         PINNACLE_POINTER_ACCEL_DENOMINATOR;
+            }
+
+            data->pointer_x_accum += raw_dx;
+            data->pointer_y_accum += raw_dy;
+            dx = data->pointer_x_accum / config->abs_rel_divisor;
+            dy = data->pointer_y_accum / config->abs_rel_divisor;
+            data->pointer_x_accum -= dx * config->abs_rel_divisor;
+            data->pointer_y_accum -= dy * config->abs_rel_divisor;
+        }
+
+        pinnacle_send_rel_scroll(dev, pinnacle_clamp_i8(dx), pinnacle_clamp_i8(dy), wheel);
+
+        if (touch_ended && data->touch_click_candidate && !data->touch_scrolled &&
+            (k_uptime_get() - data->touch_start_ms) <= PINNACLE_TAP_MAX_MS) {
+            input_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER);
+            input_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
+        }
+
+        if (touch_ended) {
+            data->touch_click_candidate = false;
+            data->touch_scrolled = false;
+            data->touch_scroll_mode = false;
+            data->pointer_x_accum = 0;
+            data->pointer_y_accum = 0;
+        }
     }
 }
 
@@ -791,6 +946,14 @@ static int pinnacle_pm_action(const struct device *dev, enum pm_device_action ac
         .absolute_mode_clamp_max_x = DT_INST_PROP(n, absolute_mode_clamp_max_x),                   \
         .absolute_mode_clamp_min_y = DT_INST_PROP(n, absolute_mode_clamp_min_y),                   \
         .absolute_mode_clamp_max_y = DT_INST_PROP(n, absolute_mode_clamp_max_y),                   \
+        .circular_scroll = DT_INST_PROP(n, circular_scroll),                                       \
+        .circular_scroll_invert = DT_INST_PROP(n, circular_scroll_invert),                         \
+        .circular_scroll_min_radius = DT_INST_PROP(n, circular_scroll_min_radius),                 \
+        .circular_scroll_active_min_radius = DT_INST_PROP(n, circular_scroll_active_min_radius),   \
+        .circular_scroll_max_radius = DT_INST_PROP(n, circular_scroll_max_radius),                 \
+        .circular_scroll_divisor = DT_INST_PROP(n, circular_scroll_divisor),                       \
+        .circular_scroll_center_x = DT_INST_PROP(n, circular_scroll_center_x),                     \
+        .circular_scroll_center_y = DT_INST_PROP(n, circular_scroll_center_y),                     \
         .x_axis_z_min = DT_INST_PROP_OR(n, x_axis_z_min, 5),                                       \
         .y_axis_z_min = DT_INST_PROP_OR(n, y_axis_z_min, 4),                                       \
         .sensitivity = DT_INST_ENUM_IDX_OR(n, sensitivity, PINNACLE_SENSITIVITY_1X),               \
